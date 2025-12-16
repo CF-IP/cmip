@@ -3,43 +3,34 @@ import base64
 import re
 import time
 import json
-from pyvirtualdisplay import Display
-
-# 引入新工具库
-try:
-    from DrissionPage import ChromiumPage, ChromiumOptions
-except:
-    pass
-
-try:
-    from playwright.sync_api import sync_playwright
-except:
-    pass
+from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 # ================= 工具函数 =================
 
 def is_valid_ip(ip):
     if not ip or len(ip) < 7:
         return False
+    
+    # 过滤明显的无效关键词
     if '0.00%' in ip or '正在' in ip or '获取' in ip:
         return False
-    # IPv4
+    
+    # 过滤时间戳 (形如 09:02:26)
+    # 如果是纯数字和冒号组成，且长度小于10，极大可能是时间
+    if re.match(r'^\d{2}:\d{2}:\d{2}$', ip):
+        return False
+
+    # IPv4 验证 (严格)
     if re.match(r'^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$', ip):
         return True
-    # IPv6
-    if ':' in ip and len(ip) > 5:
+    
+    # IPv6 验证 (加强版)
+    # 必须包含至少两个冒号，且字符只能是 hex 和冒号
+    if ip.count(':') >= 2 and re.match(r'^[0-9a-fA-F:]+$', ip):
         return True
+        
     return False
-
-def extract_ip_from_text(text):
-    # 从任意文本中提取所有合法IP
-    ips = []
-    # 简单的正则提取
-    candidates = re.findall(r'[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|[0-9a-fA-F:]{5,}', text)
-    for ip in candidates:
-        if is_valid_ip(ip):
-            ips.append(ip)
-    return ips
 
 def fetch_content_requests(url):
     try:
@@ -49,176 +40,58 @@ def fetch_content_requests(url):
     except:
         return ""
 
-# ================= 进阶测试模式 =================
+# ================= 核心抓取逻辑 =================
 
-def run_playwright_network_sniff(url):
+def fetch_uouin_data(url):
     """
-    模式A: 网络嗅探
-    直接监听网页的所有 Response，寻找包含 IP 的 JSON 数据包
+    使用 Playwright (Firefox) 获取源码
+    使用 BeautifulSoup 解析表格
     """
     results = []
     debug_log = []
     
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                viewport={'width': 1920, 'height': 1080}
-            )
-            page = context.new_page()
-
-            # 监听所有响应
-            def handle_response(response):
-                try:
-                    # 尝试解析 JSON
-                    if "json" in response.headers.get("content-type", ""):
-                        data = response.json()
-                        text_dump = json.dumps(data)
-                        found_ips = extract_ip_from_text(text_dump)
-                        if found_ips:
-                            # 简单粗暴：如果 JSON 里包含 IP，我们假设它是数据源
-                            # 这里暂时标记为 '嗅探数据'，后续可以细化解析
-                            for ip in found_ips:
-                                results.append(("嗅探数据", ip))
-                except:
-                    pass
-            
-            page.on("response", handle_response)
-            
-            page.goto(url)
-            page.wait_for_timeout(20000) # 等待20秒，确保所有 API 加载完成
-            
-            title = page.title()
-            debug_log.append(f"Page Title: {title}")
-            
-            browser.close()
-    except Exception as e:
-        debug_log.append(f"Error: {str(e)}")
-        
-    return results, debug_log
-
-def run_playwright_source_scan(url):
-    """
-    模式B: 暴力源码扫描
-    不依赖表格结构，直接获取整个网页 HTML，用正则暴力提取所有 IP
-    """
-    results = []
-    debug_log = []
-    
-    try:
-        with sync_playwright() as p:
-            browser = p.firefox.launch(headless=True) # 使用 Firefox 内核
+            # Firefox 在这次测试中表现最好
+            browser = p.firefox.launch(headless=True)
             page = browser.new_page()
+            
+            # 访问页面
             page.goto(url)
-            page.wait_for_timeout(15000)
             
-            # 获取整个页面 HTML
+            # 等待数据加载，这里给足时间，因为使用了无头模式加载可能稍慢
+            try:
+                page.wait_for_selector('table', timeout=20000) # 等待表格出现
+            except:
+                time.sleep(15) # 兜底等待
+            
+            # 获取完整 HTML
             content = page.content()
-            debug_log.append(f"Content Length: {len(content)}")
+            debug_log.append(f"Got content, length: {len(content)}")
             
-            found_ips = extract_ip_from_text(content)
-            for ip in found_ips:
-                # 简单过滤，避免把版本号当IP
-                if ip.count('.') == 3 or ':' in ip:
-                    results.append(("源码扫描", ip))
+            # 使用 BeautifulSoup 解析
+            soup = BeautifulSoup(content, 'html.parser')
+            rows = soup.find_all('tr')
+            
+            debug_log.append(f"Found {len(rows)} rows")
+            
+            for row in rows:
+                cols = row.find_all('td')
+                # 根据截图，表格结构是：[序号, 线路, 优选IP, 丢包...]
+                # 所以我们取 index 1 (线路) 和 index 2 (IP)
+                if len(cols) >= 3:
+                    line_name = cols[1].get_text(strip=True)
+                    ip_addr = cols[2].get_text(strip=True)
+                    
+                    if is_valid_ip(ip_addr):
+                        results.append((line_name, ip_addr))
             
             browser.close()
-    except Exception as e:
-        debug_log.append(f"Error: {str(e)}")
-        
-    return results, debug_log
-
-def run_drission_iframe_scan(url):
-    """
-    模式C: DrissionPage 深度扫描
-    尝试进入 iframe 查找
-    """
-    results = []
-    debug_log = []
-    display = None
-    
-    try:
-        display = Display(visible=0, size=(1920, 1080))
-        display.start()
-        
-        co = ChromiumOptions()
-        co.set_argument('--no-sandbox')
-        co.set_argument('--disable-gpu')
-        
-        page = ChromiumPage(co)
-        page.get(url)
-        time.sleep(15)
-        
-        debug_log.append(f"Title: {page.title}")
-        
-        # 1. 尝试常规表格
-        rows = page.eles('tag:tr')
-        for row in rows:
-            cols = row.eles('tag:td')
-            if len(cols) >= 3:
-                lt = cols[1].text.strip()
-                ip = cols[2].text.strip()
-                if is_valid_ip(ip):
-                    results.append((lt, ip))
-        
-        # 2. 如果没找到，尝试暴力扫描 body 文本
-        if not results:
-            text = page.html
-            ips = extract_ip_from_text(text)
-            for ip in ips:
-                results.append(("DP暴力", ip))
-                
-    except Exception as e:
-        debug_log.append(f"Error: {str(e)}")
-    finally:
-        try: page.quit()
-        except: pass
-        if display: display.stop()
-        
-    return results, debug_log
-
-def fetch_all_test_modes(url):
-    all_found = []
-    report_logs = []
-    
-    # 1. 网络嗅探模式 (最强力，直接截获数据包)
-    print("Running Mode: Playwright Network Sniffing...")
-    data, logs = run_playwright_network_sniff(url)
-    report_logs.extend(logs)
-    report_logs.append(f"Sniffing Found: {len(data)}")
-    for lt, ip in data:
-        all_found.append(f"{ip}#Sniff_{lt}")
-
-    # 2. 源码暴力扫描模式 (不信表格结构)
-    print("Running Mode: Playwright Source Scan...")
-    data, logs = run_playwright_source_scan(url)
-    report_logs.extend(logs)
-    report_logs.append(f"Source Scan Found: {len(data)}")
-    for lt, ip in data:
-        # 去重，如果刚才嗅探找到了就不加了
-        if f"{ip}#Sniff" not in str(all_found):
-            all_found.append(f"{ip}#Scan_{lt}")
-
-    # 3. DrissionPage 混合模式
-    print("Running Mode: DrissionPage Mixed...")
-    data, logs = run_drission_iframe_scan(url)
-    report_logs.extend(logs)
-    report_logs.append(f"DP Found: {len(data)}")
-    for lt, ip in data:
-        if ip not in str(all_found):
-            all_found.append(f"{ip}#DP_{lt}")
             
-    return all_found, report_logs
-
-# ================= 主程序 =================
-
-def fetch_and_parse_lines(url):
-    content = fetch_content_requests(url)
-    if not content:
-        return []
-    lines = [line.strip() for line in content.split('\n') if line.strip()]
-    return lines
+    except Exception as e:
+        debug_log.append(f"Error: {str(e)}")
+        
+    return results, debug_log
 
 def get_real_sub_url(page_url):
     content = fetch_content_requests(page_url)
@@ -259,6 +132,15 @@ def parse_proxy_nodes(sub_url):
             except: continue
     return nodes
 
+def fetch_and_parse_lines(url):
+    content = fetch_content_requests(url)
+    if not content:
+        return []
+    lines = [line.strip() for line in content.split('\n') if line.strip()]
+    return lines
+
+# ================= 主程序 =================
+
 def main():
     url_ct = "https://cf.090227.xyz/ct?ips=6"
     url_cu = "https://cf.090227.xyz/cu"
@@ -271,25 +153,62 @@ def main():
     final_list = []
     seen_ips = set()
     
-    # 1. 常规源
-    def process_url(url, type_name_prefix):
+    # 计数器
+    count_ct = 0
+    count_cu = 0
+    count_cm = 0
+    count_other = 0
+    count_multi = 0
+    count_ipv6 = 0
+    
+    # 1. 处理 API.UOUIN.COM (优先级较高，先处理)
+    # 这里的命名逻辑：
+    # 如果线路包含 "电信" -> 电信N (接续)
+    # 如果线路包含 "多线" -> 多线N
+    uouin_data, logs = fetch_uouin_data(url_selenium_target)
+    
+    # 我们先暂存这些数据，因为需要和后面的数据一起统一编号
+    # 这里用一个列表存储字典: {'ip': 'x', 'type': 'ct'}
+    
+    all_nodes = [] # 存储所有 (ip, type_code)
+    # type_code: 'ct', 'cu', 'cm', 'other', 'multi', 'ipv6', 'proxy'
+
+    # 处理 Uouin 数据
+    for line_name, ip in uouin_data:
+        if ip in seen_ips: continue
+        seen_ips.add(ip)
+        
+        l_name = line_name.upper()
+        if "电信" in l_name:
+            all_nodes.append({'ip': ip, 'type': 'ct'})
+        elif "联通" in l_name:
+            all_nodes.append({'ip': ip, 'type': 'cu'})
+        elif "移动" in l_name:
+            all_nodes.append({'ip': ip, 'type': 'cm'})
+        elif "多线" in l_name:
+            all_nodes.append({'ip': ip, 'type': 'multi'})
+        elif "IPV6" in l_name:
+            all_nodes.append({'ip': ip, 'type': 'ipv6'})
+        else:
+            all_nodes.append({'ip': ip, 'type': 'other'})
+
+    # 2. 处理常规源
+    def process_url(url, type_code):
         lines = fetch_and_parse_lines(url)
-        count = 0
         for line in lines:
             if '#' in line: ip = line.split('#')[0].strip()
             else: ip = line.strip()
             if is_valid_ip(ip) and ip not in seen_ips:
                 seen_ips.add(ip)
-                count += 1
-                final_list.append(f"{ip}#{type_name_prefix}{count}")
+                all_nodes.append({'ip': ip, 'type': type_code})
     
-    process_url(url_ct, "电信")
-    process_url(url_cu, "联通")
-    process_url(url_cm, "移动")
-    process_url(url_other, "其他")
+    process_url(url_ct, "ct")
+    process_url(url_cu, "cu")
+    process_url(url_cm, "cm")
+    process_url(url_other, "other")
     
+    # 3. 处理 Mixed 源
     lines_mixed = fetch_and_parse_lines(url_mixed)
-    c_m_ct, c_m_cu, c_m_cm, c_m_ot = 100, 100, 100, 100
     for line in lines_mixed:
         if '#' in line:
             parts = line.split('#')
@@ -297,63 +216,88 @@ def main():
             remark = parts[1].strip().upper()
             if is_valid_ip(ip) and ip not in seen_ips:
                 seen_ips.add(ip)
-                if remark.startswith('CM'): 
-                    final_list.append(f"{ip}#移动{c_m_cm}")
-                    c_m_cm += 1
-                elif remark.startswith('CU'): 
-                    final_list.append(f"{ip}#联通{c_m_cu}")
-                    c_m_cu += 1
-                elif remark.startswith('CT'): 
-                    final_list.append(f"{ip}#电信{c_m_ct}")
-                    c_m_ct += 1
-                else: 
-                    final_list.append(f"{ip}#其他{c_m_ot}")
-                    c_m_ot += 1
+                if remark.startswith('CM'): all_nodes.append({'ip': ip, 'type': 'cm'})
+                elif remark.startswith('CU'): all_nodes.append({'ip': ip, 'type': 'cu'})
+                elif remark.startswith('CT'): all_nodes.append({'ip': ip, 'type': 'ct'})
+                else: all_nodes.append({'ip': ip, 'type': 'other'})
 
-    # 2. 强力测试模式
-    print("Start Advanced Scraping...")
-    test_results, logs = fetch_all_test_modes(url_selenium_target)
-    
-    # 对测试结果进行简单去重和格式化
-    for item in test_results:
-        ip = item.split('#')[0]
-        if is_valid_ip(ip) and ip not in seen_ips:
-            seen_ips.add(ip)
-            final_list.append(item)
-
-    # 3. 反代源
+    # 4. 反代源
     real_sub_url = get_real_sub_url(url_sub_page)
     if real_sub_url:
         proxy_nodes = parse_proxy_nodes(real_sub_url)
         for node in proxy_nodes:
             ip = node.split('#')[0]
-            if is_valid_ip(ip) and ip not in seen_ips:
-                seen_ips.add(ip)
-                final_list.append(node)
+            if ip in seen_ips: continue
+            seen_ips.add(ip)
+            # 反代源特殊处理，直接存完整字符串，或者这里为了统一也加进去
+            # node 格式: ip#XX（反代IP）
+            remark = node.split('#')[1]
+            all_nodes.append({'ip': ip, 'type': 'proxy', 'remark': remark})
 
-    # 4. 输出
+    # 5. 生成最终列表和文件
+    # 排序顺序: 电信 -> 联通 -> 移动 -> 其他 -> 多线 -> IPV6 -> 反代
+    
+    list_ct = []
+    list_cu = []
+    list_cm = []
+    list_other = []
+    list_multi = []
+    list_ipv6 = []
+    list_proxy = []
+
+    for node in all_nodes:
+        t = node['type']
+        ip = node['ip']
+        
+        if t == 'ct':
+            count_ct += 1
+            list_ct.append(f"{ip}#电信{count_ct}")
+        elif t == 'cu':
+            count_cu += 1
+            list_cu.append(f"{ip}#联通{count_cu}")
+        elif t == 'cm':
+            count_cm += 1
+            list_cm.append(f"{ip}#移动{count_cm}")
+        elif t == 'other':
+            count_other += 1
+            list_other.append(f"{ip}#其他{count_other}")
+        elif t == 'multi':
+            count_multi += 1
+            list_multi.append(f"{ip}#多线{count_multi}")
+        elif t == 'ipv6':
+            count_ipv6 += 1
+            list_ipv6.append(f"{ip}#IPV6-{count_ipv6}")
+        elif t == 'proxy':
+            list_proxy.append(f"{ip}#{node['remark']}")
+
+    final_all = list_ct + list_cu + list_cm + list_other + list_multi + list_ipv6 + list_proxy
+
+    # 写入文件
     with open('cmip.txt', 'w', encoding='utf-8') as f:
-        f.write('\n'.join(final_list))
+        f.write('\n'.join(final_all))
     
     with open('ip.txt', 'w', encoding='utf-8') as f:
-        f.write('\n'.join(final_list))
-        
-    def save_keyword(keyword, filename):
-        lines = [l for l in final_list if keyword in l]
-        with open(filename, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(lines))
-            
-    save_keyword("电信", "ct.txt")
-    save_keyword("联通", "cu.txt")
-    save_keyword("移动", "cm.txt")
-    # 注意：如果网络嗅探成功，关键词可能是 Sniff_嗅探数据，所以这里把包含 Sniff 的也存入多线（暂存）
-    # 或者你需要手动检查 ip.txt 看看新模式的后缀是什么，然后再分类
-    save_keyword("多线", "多线.txt")
-    save_keyword("Sniff", "多线.txt") # 暂时把嗅探到的放入多线，方便查看
-    save_keyword("Scan", "多线.txt")  # 暂时把扫描到的放入多线
-    save_keyword("IPV6", "ipv6.txt")
-    save_keyword("反代IP", "反代.txt")
+        f.write('\n'.join(final_all))
+
+    with open('ct.txt', 'w', encoding='utf-8') as f:
+        f.write('\n'.join(list_ct))
     
+    with open('cu.txt', 'w', encoding='utf-8') as f:
+        f.write('\n'.join(list_cu))
+        
+    with open('cm.txt', 'w', encoding='utf-8') as f:
+        f.write('\n'.join(list_cm))
+        
+    with open('多线.txt', 'w', encoding='utf-8') as f:
+        f.write('\n'.join(list_multi))
+        
+    with open('ipv6.txt', 'w', encoding='utf-8') as f:
+        f.write('\n'.join(list_ipv6))
+        
+    with open('反代.txt', 'w', encoding='utf-8') as f:
+        f.write('\n'.join(list_proxy))
+        
+    # 记录日志，方便排查
     with open('测试报告.txt', 'w', encoding='utf-8') as f:
         f.write('\n'.join(logs))
 
