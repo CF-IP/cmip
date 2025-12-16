@@ -21,15 +21,15 @@ jobs:
       with:
         python-version: '3.x'
 
-    - name: Install Chrome
+    - name: Install Chrome and Utilities
       run: |
         sudo apt-get update
-        sudo apt-get install -y google-chrome-stable
+        sudo apt-get install -y google-chrome-stable xvfb
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install requests selenium webdriver-manager
+        pip install requests selenium webdriver-manager cloudscraper pyvirtualdisplay
 
     - name: Run script
       run: python main.py
@@ -39,5 +39,5 @@ jobs:
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
         git config --local user.name "github-actions[bot]"
         git add .
-        git commit -m "Auto update IP lists" || echo "No changes to commit"
+        git commit -m "Auto update IP lists with test modes" || echo "No changes to commit"
         git push
