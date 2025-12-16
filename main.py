@@ -8,10 +8,25 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
 
+def is_valid_ip(ip):
+    # IPv4 验证
+    ipv4_pattern = r'^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'
+    # IPv6 验证 (简单版)
+    ipv6_pattern = r'^[0-9a-fA-F:]+$'
+    
+    if re.match(ipv4_pattern, ip):
+        return True
+    if ':' in ip and re.match(ipv6_pattern, ip):
+        return True
+    return False
+
 def fetch_content(url, retries=3):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     for i in range(retries):
         try:
-            response = requests.get(url, timeout=15)
+            response = requests.get(url, headers=headers, timeout=15)
             response.raise_for_status()
             return response.text
         except:
@@ -47,13 +62,16 @@ def fetch_selenium_data(url):
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
     driver = None
     try:
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.get(url)
-        time.sleep(8) 
+        time.sleep(12)  # 增加等待时间以应对加载延迟
         
         rows = driver.find_elements(By.TAG_NAME, "tr")
         for row in rows:
@@ -61,7 +79,9 @@ def fetch_selenium_data(url):
             if len(cols) >= 3:
                 line_type = cols[1].text.strip()
                 ip = cols[2].text.strip()
-                if ip and line_type:
+                
+                # 严格校验 IP 格式
+                if ip and is_valid_ip(ip):
                     results.append((line_type, ip))
     except:
         pass
@@ -120,7 +140,8 @@ def parse_proxy_nodes(sub_url):
                     if port == '443':
                         if len(remark) >= 2 and re.match(r'^[A-Za-z]{2}', remark):
                             code = remark[0:2].upper()
-                            nodes.append((ip, code))
+                            if is_valid_ip(ip):
+                                nodes.append((ip, code))
             except:
                 continue
                 
@@ -153,6 +174,8 @@ def main():
     seen_ips = set()
 
     def is_new_ip(ip_addr):
+        if not is_valid_ip(ip_addr):
+            return False
         if ip_addr in seen_ips:
             return False
         seen_ips.add(ip_addr)
