@@ -11,25 +11,17 @@ from playwright.sync_api import sync_playwright
 def is_valid_ip(ip):
     if not ip or len(ip) < 7:
         return False
-    
-    # 过滤明显的无效关键词
     if '0.00%' in ip or '正在' in ip or '获取' in ip:
         return False
-    
-    # 过滤时间戳 (形如 09:02:26)
-    # 如果是纯数字和冒号组成，且长度小于10，极大可能是时间
+    # 过滤时间戳
     if re.match(r'^\d{2}:\d{2}:\d{2}$', ip):
         return False
-
-    # IPv4 验证 (严格)
+    # IPv4
     if re.match(r'^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$', ip):
         return True
-    
-    # IPv6 验证 (加强版)
-    # 必须包含至少两个冒号，且字符只能是 hex 和冒号
+    # IPv6
     if ip.count(':') >= 2 and re.match(r'^[0-9a-fA-F:]+$', ip):
         return True
-        
     return False
 
 def fetch_content_requests(url):
@@ -43,48 +35,57 @@ def fetch_content_requests(url):
 # ================= 核心抓取逻辑 =================
 
 def fetch_uouin_data(url):
-    """
-    使用 Playwright (Firefox) 获取源码
-    使用 BeautifulSoup 解析表格
-    """
     results = []
     debug_log = []
     
     try:
         with sync_playwright() as p:
-            # Firefox 在这次测试中表现最好
+            # 继续使用 Firefox，因为它已经证明能成功加载页面
             browser = p.firefox.launch(headless=True)
             page = browser.new_page()
             
-            # 访问页面
             page.goto(url)
             
-            # 等待数据加载，这里给足时间，因为使用了无头模式加载可能稍慢
+            # 等待表格加载
             try:
-                page.wait_for_selector('table', timeout=20000) # 等待表格出现
+                page.wait_for_selector('table', timeout=25000)
             except:
-                time.sleep(15) # 兜底等待
+                time.sleep(5)
             
-            # 获取完整 HTML
             content = page.content()
             debug_log.append(f"Got content, length: {len(content)}")
             
-            # 使用 BeautifulSoup 解析
             soup = BeautifulSoup(content, 'html.parser')
             rows = soup.find_all('tr')
             
             debug_log.append(f"Found {len(rows)} rows")
             
-            for row in rows:
+            # === 详细调试日志 ===
+            for i, row in enumerate(rows):
                 cols = row.find_all('td')
-                # 根据截图，表格结构是：[序号, 线路, 优选IP, 丢包...]
-                # 所以我们取 index 1 (线路) 和 index 2 (IP)
+                # 打印每一列的内容，方便定位
+                row_text = [c.get_text(strip=True) for c in cols]
+                debug_log.append(f"Row {i}: {row_text}")
+                
+                # 尝试多种列组合，防止列偏移
                 if len(cols) >= 3:
+                    # 假设标准结构: [序号, 线路, IP, ...]
                     line_name = cols[1].get_text(strip=True)
                     ip_addr = cols[2].get_text(strip=True)
                     
+                    # 兜底检测: 如果第2列看起来像IP，说明列偏移了
+                    if is_valid_ip(line_name) and not is_valid_ip(ip_addr):
+                         # 交换
+                         temp = line_name
+                         line_name = cols[0].get_text(strip=True) # 可能是前一列
+                         ip_addr = temp
+                         debug_log.append(f"  -> Detected column shift, adjusted IP to: {ip_addr}")
+
                     if is_valid_ip(ip_addr):
                         results.append((line_name, ip_addr))
+                        debug_log.append(f"  -> Extracted: [{line_name}] - [{ip_addr}]")
+                    else:
+                        debug_log.append(f"  -> Invalid IP skipped: {ip_addr}")
             
             browser.close()
             
@@ -161,17 +162,10 @@ def main():
     count_multi = 0
     count_ipv6 = 0
     
-    # 1. 处理 API.UOUIN.COM (优先级较高，先处理)
-    # 这里的命名逻辑：
-    # 如果线路包含 "电信" -> 电信N (接续)
-    # 如果线路包含 "多线" -> 多线N
+    # 1. 处理 API.UOUIN.COM
     uouin_data, logs = fetch_uouin_data(url_selenium_target)
     
-    # 我们先暂存这些数据，因为需要和后面的数据一起统一编号
-    # 这里用一个列表存储字典: {'ip': 'x', 'type': 'ct'}
-    
-    all_nodes = [] # 存储所有 (ip, type_code)
-    # type_code: 'ct', 'cu', 'cm', 'other', 'multi', 'ipv6', 'proxy'
+    all_nodes = [] 
 
     # 处理 Uouin 数据
     for line_name, ip in uouin_data:
@@ -179,17 +173,14 @@ def main():
         seen_ips.add(ip)
         
         l_name = line_name.upper()
-        if "电信" in l_name:
-            all_nodes.append({'ip': ip, 'type': 'ct'})
-        elif "联通" in l_name:
-            all_nodes.append({'ip': ip, 'type': 'cu'})
-        elif "移动" in l_name:
-            all_nodes.append({'ip': ip, 'type': 'cm'})
-        elif "多线" in l_name:
-            all_nodes.append({'ip': ip, 'type': 'multi'})
-        elif "IPV6" in l_name:
-            all_nodes.append({'ip': ip, 'type': 'ipv6'})
-        else:
+        # 宽容匹配
+        if "电信" in l_name: all_nodes.append({'ip': ip, 'type': 'ct'})
+        elif "联通" in l_name: all_nodes.append({'ip': ip, 'type': 'cu'})
+        elif "移动" in l_name: all_nodes.append({'ip': ip, 'type': 'cm'})
+        elif "多线" in l_name: all_nodes.append({'ip': ip, 'type': 'multi'})
+        elif "IPV6" in l_name: all_nodes.append({'ip': ip, 'type': 'ipv6'})
+        else: 
+            # 这里的 fallback 很重要，如果什么都没匹配到，暂时归为 other，并在日志里体现
             all_nodes.append({'ip': ip, 'type': 'other'})
 
     # 2. 处理常规源
@@ -207,7 +198,7 @@ def main():
     process_url(url_cm, "cm")
     process_url(url_other, "other")
     
-    # 3. 处理 Mixed 源
+    # 3. Mixed 源
     lines_mixed = fetch_and_parse_lines(url_mixed)
     for line in lines_mixed:
         if '#' in line:
@@ -229,14 +220,10 @@ def main():
             ip = node.split('#')[0]
             if ip in seen_ips: continue
             seen_ips.add(ip)
-            # 反代源特殊处理，直接存完整字符串，或者这里为了统一也加进去
-            # node 格式: ip#XX（反代IP）
             remark = node.split('#')[1]
             all_nodes.append({'ip': ip, 'type': 'proxy', 'remark': remark})
 
-    # 5. 生成最终列表和文件
-    # 排序顺序: 电信 -> 联通 -> 移动 -> 其他 -> 多线 -> IPV6 -> 反代
-    
+    # 5. 生成文件
     list_ct = []
     list_cu = []
     list_cm = []
@@ -272,32 +259,15 @@ def main():
 
     final_all = list_ct + list_cu + list_cm + list_other + list_multi + list_ipv6 + list_proxy
 
-    # 写入文件
-    with open('cmip.txt', 'w', encoding='utf-8') as f:
-        f.write('\n'.join(final_all))
-    
-    with open('ip.txt', 'w', encoding='utf-8') as f:
-        f.write('\n'.join(final_all))
-
-    with open('ct.txt', 'w', encoding='utf-8') as f:
-        f.write('\n'.join(list_ct))
-    
-    with open('cu.txt', 'w', encoding='utf-8') as f:
-        f.write('\n'.join(list_cu))
+    with open('cmip.txt', 'w', encoding='utf-8') as f: f.write('\n'.join(final_all))
+    with open('ip.txt', 'w', encoding='utf-8') as f: f.write('\n'.join(final_all))
+    with open('ct.txt', 'w', encoding='utf-8') as f: f.write('\n'.join(list_ct))
+    with open('cu.txt', 'w', encoding='utf-8') as f: f.write('\n'.join(list_cu))
+    with open('cm.txt', 'w', encoding='utf-8') as f: f.write('\n'.join(list_cm))
+    with open('多线.txt', 'w', encoding='utf-8') as f: f.write('\n'.join(list_multi))
+    with open('ipv6.txt', 'w', encoding='utf-8') as f: f.write('\n'.join(list_ipv6))
+    with open('反代.txt', 'w', encoding='utf-8') as f: f.write('\n'.join(list_proxy))
         
-    with open('cm.txt', 'w', encoding='utf-8') as f:
-        f.write('\n'.join(list_cm))
-        
-    with open('多线.txt', 'w', encoding='utf-8') as f:
-        f.write('\n'.join(list_multi))
-        
-    with open('ipv6.txt', 'w', encoding='utf-8') as f:
-        f.write('\n'.join(list_ipv6))
-        
-    with open('反代.txt', 'w', encoding='utf-8') as f:
-        f.write('\n'.join(list_proxy))
-        
-    # 记录日志，方便排查
     with open('测试报告.txt', 'w', encoding='utf-8') as f:
         f.write('\n'.join(logs))
 
