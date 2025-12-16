@@ -17,7 +17,10 @@ def main():
     url_other = "https://cf.090227.xyz/ip.164746.xyz"
     url_mixed = "https://cf.090227.xyz/CloudFlareYes"
 
-    results = []
+    list_ct = []
+    list_cu = []
+    list_cm = []
+    list_other = []
     
     count_ct = 0
     count_cu = 0
@@ -32,7 +35,7 @@ def main():
             ip = line.strip()
         if ip:
             count_ct += 1
-            results.append(f"{ip}#电信{count_ct}")
+            list_ct.append(f"{ip}#电信{count_ct}")
 
     lines_cu = fetch_and_parse(url_cu)
     for line in lines_cu:
@@ -42,7 +45,7 @@ def main():
             ip = line.strip()
         if ip:
             count_cu += 1
-            results.append(f"{ip}#联通{count_cu}")
+            list_cu.append(f"{ip}#联通{count_cu}")
 
     lines_cm = fetch_and_parse(url_cm)
     for line in lines_cm:
@@ -52,7 +55,7 @@ def main():
             ip = line.strip()
         if ip:
             count_cm += 1
-            results.append(f"{ip}#移动{count_cm}")
+            list_cm.append(f"{ip}#移动{count_cm}")
 
     lines_other = fetch_and_parse(url_other)
     for line in lines_other:
@@ -62,7 +65,7 @@ def main():
             ip = line.strip()
         if ip:
             count_other += 1
-            results.append(f"{ip}#其他{count_other}")
+            list_other.append(f"{ip}#其他{count_other}")
 
     lines_mixed = fetch_and_parse(url_mixed)
     for line in lines_mixed:
@@ -73,16 +76,18 @@ def main():
             
             if remark.startswith('CM'):
                 count_cm += 1
-                results.append(f"{ip}#移动{count_cm}")
+                list_cm.append(f"{ip}#移动{count_cm}")
             elif remark.startswith('CU'):
                 count_cu += 1
-                results.append(f"{ip}#联通{count_cu}")
+                list_cu.append(f"{ip}#联通{count_cu}")
             elif remark.startswith('CT'):
                 count_ct += 1
-                results.append(f"{ip}#电信{count_ct}")
+                list_ct.append(f"{ip}#电信{count_ct}")
+
+    final_results = list_ct + list_cu + list_cm + list_other
 
     with open('cmip.txt', 'w', encoding='utf-8') as f:
-        f.write('\n'.join(results))
+        f.write('\n'.join(final_results))
 
 if __name__ == "__main__":
     main()
