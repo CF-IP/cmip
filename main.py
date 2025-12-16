@@ -84,7 +84,7 @@ def parse_proxy_nodes(sub_url):
                         continue 
 
                     if port == '443':
-                        if len(remark) >= 2 and remark[0:2].isalpha():
+                        if len(remark) >= 2 and re.match(r'^[A-Za-z]{2}', remark):
                             code = remark[0:2].upper()
                             nodes.append(f"{ip}#{code}（反代IP）")
             except:
