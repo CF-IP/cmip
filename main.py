@@ -2,17 +2,12 @@ import requests
 import base64
 import re
 import time
-import os
+import json
 from pyvirtualdisplay import Display
 
 # 引入新工具库
 try:
     from DrissionPage import ChromiumPage, ChromiumOptions
-except:
-    pass
-
-try:
-    import undetected_chromedriver as uc
 except:
     pass
 
@@ -36,6 +31,16 @@ def is_valid_ip(ip):
         return True
     return False
 
+def extract_ip_from_text(text):
+    # 从任意文本中提取所有合法IP
+    ips = []
+    # 简单的正则提取
+    candidates = re.findall(r'[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|[0-9a-fA-F:]{5,}', text)
+    for ip in candidates:
+        if is_valid_ip(ip):
+            ips.append(ip)
+    return ips
+
 def fetch_content_requests(url):
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -44,160 +49,166 @@ def fetch_content_requests(url):
     except:
         return ""
 
-# ================= 强力测试模式 =================
+# ================= 进阶测试模式 =================
 
-def run_drission_mode(url, mode_name, use_xvfb=True):
+def run_playwright_network_sniff(url):
+    """
+    模式A: 网络嗅探
+    直接监听网页的所有 Response，寻找包含 IP 的 JSON 数据包
+    """
     results = []
-    debug_info = "No Run"
-    display = None
-    page = None
+    debug_log = []
     
     try:
-        if use_xvfb:
-            display = Display(visible=0, size=(1920, 1080))
-            display.start()
-        
-        co = ChromiumOptions()
-        co.set_argument('--no-sandbox')
-        co.set_argument('--disable-gpu')
-        if not use_xvfb:
-            co.headless() 
-            
-        page = ChromiumPage(co)
-        page.get(url)
-        
-        # 等待真实数据加载 (等待15秒)
-        time.sleep(15)
-        
-        debug_info = page.title
-        
-        # 获取表格
-        rows = page.eles('tag:tr')
-        for row in rows:
-            cols = row.eles('tag:td')
-            if len(cols) >= 3:
-                line_type = cols[1].text.strip()
-                ip = cols[2].text.strip()
-                if is_valid_ip(ip):
-                    results.append((line_type, ip))
-                    
-    except Exception as e:
-        debug_info = f"Error: {str(e)}"
-    finally:
-        try:
-            if page: page.quit()
-        except: pass
-        if display: display.stop()
-        
-    return results, debug_info
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                viewport={'width': 1920, 'height': 1080}
+            )
+            page = context.new_page()
 
-def run_undetected_mode(url, mode_name):
+            # 监听所有响应
+            def handle_response(response):
+                try:
+                    # 尝试解析 JSON
+                    if "json" in response.headers.get("content-type", ""):
+                        data = response.json()
+                        text_dump = json.dumps(data)
+                        found_ips = extract_ip_from_text(text_dump)
+                        if found_ips:
+                            # 简单粗暴：如果 JSON 里包含 IP，我们假设它是数据源
+                            # 这里暂时标记为 '嗅探数据'，后续可以细化解析
+                            for ip in found_ips:
+                                results.append(("嗅探数据", ip))
+                except:
+                    pass
+            
+            page.on("response", handle_response)
+            
+            page.goto(url)
+            page.wait_for_timeout(20000) # 等待20秒，确保所有 API 加载完成
+            
+            title = page.title()
+            debug_log.append(f"Page Title: {title}")
+            
+            browser.close()
+    except Exception as e:
+        debug_log.append(f"Error: {str(e)}")
+        
+    return results, debug_log
+
+def run_playwright_source_scan(url):
+    """
+    模式B: 暴力源码扫描
+    不依赖表格结构，直接获取整个网页 HTML，用正则暴力提取所有 IP
+    """
     results = []
-    debug_info = "No Run"
+    debug_log = []
+    
+    try:
+        with sync_playwright() as p:
+            browser = p.firefox.launch(headless=True) # 使用 Firefox 内核
+            page = browser.new_page()
+            page.goto(url)
+            page.wait_for_timeout(15000)
+            
+            # 获取整个页面 HTML
+            content = page.content()
+            debug_log.append(f"Content Length: {len(content)}")
+            
+            found_ips = extract_ip_from_text(content)
+            for ip in found_ips:
+                # 简单过滤，避免把版本号当IP
+                if ip.count('.') == 3 or ':' in ip:
+                    results.append(("源码扫描", ip))
+            
+            browser.close()
+    except Exception as e:
+        debug_log.append(f"Error: {str(e)}")
+        
+    return results, debug_log
+
+def run_drission_iframe_scan(url):
+    """
+    模式C: DrissionPage 深度扫描
+    尝试进入 iframe 查找
+    """
+    results = []
+    debug_log = []
     display = None
-    driver = None
     
     try:
         display = Display(visible=0, size=(1920, 1080))
         display.start()
         
-        options = uc.ChromeOptions()
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
+        co = ChromiumOptions()
+        co.set_argument('--no-sandbox')
+        co.set_argument('--disable-gpu')
         
-        driver = uc.Chrome(options=options, version_main=114) # 尝试指定版本或自动
-        driver.get(url)
+        page = ChromiumPage(co)
+        page.get(url)
         time.sleep(15)
         
-        debug_info = driver.title
+        debug_log.append(f"Title: {page.title}")
         
-        from selenium.webdriver.common.by import By
-        rows = driver.find_elements(By.TAG_NAME, "tr")
+        # 1. 尝试常规表格
+        rows = page.eles('tag:tr')
         for row in rows:
-            cols = row.find_elements(By.TAG_NAME, "td")
+            cols = row.eles('tag:td')
             if len(cols) >= 3:
-                line_type = cols[1].text.strip()
+                lt = cols[1].text.strip()
                 ip = cols[2].text.strip()
                 if is_valid_ip(ip):
-                    results.append((line_type, ip))
+                    results.append((lt, ip))
+        
+        # 2. 如果没找到，尝试暴力扫描 body 文本
+        if not results:
+            text = page.html
+            ips = extract_ip_from_text(text)
+            for ip in ips:
+                results.append(("DP暴力", ip))
+                
     except Exception as e:
-        debug_info = f"Error: {str(e)}"
+        debug_log.append(f"Error: {str(e)}")
     finally:
-        try:
-            if driver: driver.quit()
+        try: page.quit()
         except: pass
         if display: display.stop()
         
-    return results, debug_info
-
-def run_playwright_mode(url, browser_type_name):
-    results = []
-    debug_info = "No Run"
-    
-    try:
-        with sync_playwright() as p:
-            if browser_type_name == 'chromium':
-                browser = p.chromium.launch(headless=True)
-            elif browser_type_name == 'firefox':
-                browser = p.firefox.launch(headless=True)
-            elif browser_type_name == 'webkit':
-                browser = p.webkit.launch(headless=True)
-            else:
-                return [], "Unknown Browser"
-                
-            page = browser.new_page()
-            page.goto(url)
-            page.wait_for_timeout(15000) # 等待15秒
-            
-            debug_info = page.title()
-            
-            rows = page.locator("tr").all()
-            for row in rows:
-                cols = row.locator("td").all()
-                if len(cols) >= 3:
-                    line_type = cols[1].inner_text().strip()
-                    ip = cols[2].inner_text().strip()
-                    if is_valid_ip(ip):
-                        results.append((line_type, ip))
-            browser.close()
-    except Exception as e:
-        debug_info = f"Error: {str(e)}"
-        
-    return results, debug_info
+    return results, debug_log
 
 def fetch_all_test_modes(url):
     all_found = []
     report_logs = []
     
-    # 1. DrissionPage 模式 (目前最强)
-    print("Running DrissionPage...")
-    data, info = run_drission_mode(url, "DP_Xvfb", use_xvfb=True)
-    report_logs.append(f"Mode: DrissionPage_Xvfb | Title: {info} | Found: {len(data)}")
-    if data:
-        for lt, ip in data: all_found.append(f"{ip}#DP_Xvfb_{lt}")
+    # 1. 网络嗅探模式 (最强力，直接截获数据包)
+    print("Running Mode: Playwright Network Sniffing...")
+    data, logs = run_playwright_network_sniff(url)
+    report_logs.extend(logs)
+    report_logs.append(f"Sniffing Found: {len(data)}")
+    for lt, ip in data:
+        all_found.append(f"{ip}#Sniff_{lt}")
 
-    # 2. Undetected Chromedriver (UC)
-    # print("Running Undetected Chromedriver...")
-    # data, info = run_undetected_mode(url, "UC_Default")
-    # report_logs.append(f"Mode: UC_Default | Title: {info} | Found: {len(data)}")
-    # if data:
-    #    for lt, ip in data: all_found.append(f"{ip}#UC_{lt}")
-    # UC 在 Github Actions 环境极易报错，暂时注释，先跑 Playwright
+    # 2. 源码暴力扫描模式 (不信表格结构)
+    print("Running Mode: Playwright Source Scan...")
+    data, logs = run_playwright_source_scan(url)
+    report_logs.extend(logs)
+    report_logs.append(f"Source Scan Found: {len(data)}")
+    for lt, ip in data:
+        # 去重，如果刚才嗅探找到了就不加了
+        if f"{ip}#Sniff" not in str(all_found):
+            all_found.append(f"{ip}#Scan_{lt}")
 
-    # 3. Playwright Firefox (火狐内核，指纹不同)
-    print("Running Playwright Firefox...")
-    data, info = run_playwright_mode(url, "firefox")
-    report_logs.append(f"Mode: PW_Firefox | Title: {info} | Found: {len(data)}")
-    if data:
-        for lt, ip in data: all_found.append(f"{ip}#PW_Firefox_{lt}")
-
-    # 4. Playwright Webkit (Safari内核)
-    print("Running Playwright Webkit...")
-    data, info = run_playwright_mode(url, "webkit")
-    report_logs.append(f"Mode: PW_Webkit | Title: {info} | Found: {len(data)}")
-    if data:
-        for lt, ip in data: all_found.append(f"{ip}#PW_Webkit_{lt}")
-        
+    # 3. DrissionPage 混合模式
+    print("Running Mode: DrissionPage Mixed...")
+    data, logs = run_drission_iframe_scan(url)
+    report_logs.extend(logs)
+    report_logs.append(f"DP Found: {len(data)}")
+    for lt, ip in data:
+        if ip not in str(all_found):
+            all_found.append(f"{ip}#DP_{lt}")
+            
     return all_found, report_logs
 
 # ================= 主程序 =================
@@ -299,16 +310,26 @@ def main():
                     final_list.append(f"{ip}#其他{c_m_ot}")
                     c_m_ot += 1
 
-    # 2. 强力测试模式 (DrissionPage / Playwright)
+    # 2. 强力测试模式
     print("Start Advanced Scraping...")
     test_results, logs = fetch_all_test_modes(url_selenium_target)
-    final_list.extend(test_results)
+    
+    # 对测试结果进行简单去重和格式化
+    for item in test_results:
+        ip = item.split('#')[0]
+        if is_valid_ip(ip) and ip not in seen_ips:
+            seen_ips.add(ip)
+            final_list.append(item)
 
     # 3. 反代源
     real_sub_url = get_real_sub_url(url_sub_page)
     if real_sub_url:
         proxy_nodes = parse_proxy_nodes(real_sub_url)
-        final_list.extend(proxy_nodes)
+        for node in proxy_nodes:
+            ip = node.split('#')[0]
+            if is_valid_ip(ip) and ip not in seen_ips:
+                seen_ips.add(ip)
+                final_list.append(node)
 
     # 4. 输出
     with open('cmip.txt', 'w', encoding='utf-8') as f:
@@ -325,11 +346,14 @@ def main():
     save_keyword("电信", "ct.txt")
     save_keyword("联通", "cu.txt")
     save_keyword("移动", "cm.txt")
+    # 注意：如果网络嗅探成功，关键词可能是 Sniff_嗅探数据，所以这里把包含 Sniff 的也存入多线（暂存）
+    # 或者你需要手动检查 ip.txt 看看新模式的后缀是什么，然后再分类
     save_keyword("多线", "多线.txt")
+    save_keyword("Sniff", "多线.txt") # 暂时把嗅探到的放入多线，方便查看
+    save_keyword("Scan", "多线.txt")  # 暂时把扫描到的放入多线
     save_keyword("IPV6", "ipv6.txt")
     save_keyword("反代IP", "反代.txt")
     
-    # 写入详细的调试日志
     with open('测试报告.txt', 'w', encoding='utf-8') as f:
         f.write('\n'.join(logs))
 
